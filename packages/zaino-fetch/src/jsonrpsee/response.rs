@@ -359,9 +359,13 @@ pub struct GetBlockchainInfoResponse {
         zebra_rpc::methods::NetworkUpgradeInfo,
     >,
 
-    /// Value pool balances
+    /// Value pool balances.
+    ///
+    /// NU7 fork (NSM) adds a 6th pool (`lts`), so this is always a 6-element
+    /// array against the valargroup/zebra fork. See `BlockchainValuePoolBalances`
+    /// in zebra-rpc.
     #[serde(rename = "valuePools")]
-    value_pools: [ChainBalance; 5],
+    value_pools: [ChainBalance; 6],
 
     /// Branch IDs of the current and upcoming consensus rules
     pub consensus: zebra_rpc::methods::TipConsensusBranch,
@@ -617,6 +621,9 @@ impl<'de> Deserialize<'de> for ChainBalance {
             "lockbox" | "deferred" => Ok(ChainBalance(GetBlockchainInfoBalance::deferred(
                 amount, None,
             ))),
+            // NU7 fork (NSM): the long-term-support pool. Always present
+            // against valargroup/zebra, zero pre-NU7.
+            "lts" => Ok(ChainBalance(GetBlockchainInfoBalance::lts(amount, None))),
             "" => Ok(ChainBalance(GetBlockchainInfoBalance::chain_supply(
                 // The pools are immediately summed internally, which pool we pick doesn't matter here
                 ValueBalance::from_transparent_amount(amount),
@@ -1096,7 +1103,7 @@ pub struct BlockObject {
     /// Value pool balances
     ///
     #[serde(rename = "valuePools")]
-    value_pools: Option<[ChainBalance; 5]>,
+    value_pools: Option<[ChainBalance; 6]>,
 
     /// Information about the note commitment trees.
     pub trees: GetBlockTrees,
@@ -1157,8 +1164,15 @@ impl TryFrom<GetBlockResponse> for zebra_rpc::methods::GetBlock {
                         block.difficulty,
                         block.chain_supply.map(|supply| supply.0),
                         block.value_pools.map(
-                            |[transparent, sprout, sapling, orchard, deferred]| {
-                                [transparent.0, sprout.0, sapling.0, orchard.0, deferred.0]
+                            |[transparent, sprout, sapling, orchard, deferred, lts]| {
+                                [
+                                    transparent.0,
+                                    sprout.0,
+                                    sapling.0,
+                                    orchard.0,
+                                    deferred.0,
+                                    lts.0,
+                                ]
                             },
                         ),
                         block.trees.into(),

@@ -1,0 +1,104 @@
+name: Fork release artifacts
+
+# Builds an Ubuntu-22.04+ compatible `zainod` binary (default + no-TLS variants)
+# and attaches it to a GitHub release. Mirrors valargroup/zebra's
+# `fork-release-artifacts.yml`, adapted for zaino's NU7 fork branch.
+#
+# The binary is built directly on the ubuntu-22.04 runner (glibc 2.35), so the
+# resulting binary runs on Ubuntu 22.04 and newer. The NU7 / ZIP-235 / NSM cfg
+# flags come from `.cargo/config.toml` automatically — do NOT set a RUSTFLAGS
+# env var here, it would override (not merge with) those flags.
+#
+# Trigger: a *published* GitHub release, or a manual run against an existing
+# release tag. NOTE: a release created by the default GITHUB_TOKEN (e.g. by
+# release.yaml) does NOT emit a `release: published` event that can trigger this
+# workflow. For the automated path, publish the release from the UI / a PAT, or
+# just run this workflow via `workflow_dispatch` with the tag.
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach artifacts to (must already exist)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  TRIPLE: x86_64-unknown-linux-gnu
+  # Resolve the private valargroup/zebra cargo git dependency via the git CLI
+  # (so it uses the ssh-agent key below). Redundant with .cargo/config.toml,
+  # set here too so it applies before the working dir is entered.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # rocksdb's vendored headers don't include <cstdint>; harmless on older GCC,
+  # required if the runner image ships GCC 13+.
+  CXXFLAGS: -include cstdint
+
+jobs:
+  linux-x86_64-binary:
+    name: Build Ubuntu 22.04 zainod binary (default + no-tls)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      # SSH key with read access to the private valargroup/zebra fork that the
+      # [patch.crates-io] in Cargo.toml points at. Add the key as the
+      # VALAR_ZEBRA_SSH_KEY repo secret (a deploy key on valargroup/zebra works).
+      - name: Authenticate to the zebra fork (cargo git dependency)
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.VALAR_ZEBRA_SSH_KEY }}
+
+      - name: Trust github.com host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang cmake make libssl-dev protobuf-compiler
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Build zainod (default + no-tls)
+        run: |
+          cargo build --locked --release --package zainod --bin zainod
+          install -D -m0755 target/release/zainod dist/zainod
+          cargo build --locked --release --package zainod --bin zainod \
+            --features no_tls_use_unencrypted_traffic
+          install -D -m0755 target/release/zainod dist/zainod-no-tls
+
+      - name: Package binaries + checksums
+        run: |
+          mkdir -p pkg
+          cp dist/zainod pkg/zainod
+          tar -C pkg -czf "zainod-${RELEASE_TAG}-${TRIPLE}.tar.gz" zainod
+          cp dist/zainod-no-tls pkg/zainod
+          tar -C pkg -czf "zainod-${RELEASE_TAG}-${TRIPLE}-no-tls.tar.gz" zainod
+          rm pkg/zainod
+          for f in zainod-${RELEASE_TAG}-${TRIPLE}*.tar.gz; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
+      - name: Upload binaries to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${RELEASE_TAG}" \
+            "zainod-${RELEASE_TAG}-${TRIPLE}.tar.gz" \
+            "zainod-${RELEASE_TAG}-${TRIPLE}.tar.gz.sha256" \
+            "zainod-${RELEASE_TAG}-${TRIPLE}-no-tls.tar.gz" \
+            "zainod-${RELEASE_TAG}-${TRIPLE}-no-tls.tar.gz.sha256" \
+            --clobber

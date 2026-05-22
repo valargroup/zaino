@@ -4529,8 +4529,7 @@ dependencies = [
 [[package]]
 name = "tower-batch-control"
 version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e6cf52578f98b4da47335c26c4f883f7993b1a9b9d2f5420eb8dbfd5dd19a28"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "futures",
  "futures-core",
@@ -4546,8 +4545,7 @@ dependencies = [
 [[package]]
 name = "tower-fallback"
 version = "0.2.41"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4434e19ee996ee5c6aa42f11463a355138452592e5c5b5b73b6f0f19534556af"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "futures-core",
  "pin-project",
@@ -5823,8 +5821,7 @@ dependencies = [
 [[package]]
 name = "zebra-chain"
 version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99160b5cb49188c44bcba2ae56d0a85d2ba592243247451458bdf50ac3fd596d"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "bech32",
  "bitflags 2.11.1",
@@ -5892,8 +5889,7 @@ dependencies = [
 [[package]]
 name = "zebra-consensus"
 version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8e7835e49a2056b262cd4adc4b9b1f85f11821dad6b9353742d4bf088cef3fb"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -5931,8 +5927,7 @@ dependencies = [
 [[package]]
 name = "zebra-network"
 version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c072b418e2858eb1963116356c5093033ca3c6f62426ea7acf2a22e0d031bcaf"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "bitflags 2.11.1",
  "byteorder",
@@ -5969,8 +5964,7 @@ dependencies = [
 [[package]]
 name = "zebra-node-services"
 version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfa5570277295b66b33fb6aa4a1d8ceed5e33925d3928be7afc18e8af157ec7b"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "color-eyre",
  "jsonrpsee-types",
@@ -5985,8 +5979,7 @@ dependencies = [
 [[package]]
 name = "zebra-rpc"
 version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4e44dc2ca75c5ab16a2ce489f9919da2f6b2141ea5bff1f84addf96e871b5b5"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "base64",
  "chrono",
@@ -6039,8 +6032,7 @@ dependencies = [
 [[package]]
 name = "zebra-script"
 version = "6.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b44d0d0e79ff9ed4db6b86dd60bec76c2d6fc3046658f82456063cad43b8dfe4"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "libzcash_script",
  "rand 0.8.6",
@@ -6053,8 +6045,7 @@ dependencies = [
 [[package]]
 name = "zebra-state"
 version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81fecd536ba6131e3560995b42590dbe08bd767003dfac102995140a00ad2ab3"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "bincode",
  "chrono",
@@ -6091,8 +6082,7 @@ dependencies = [
 [[package]]
 name = "zebra-test"
 version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd2b1e773cbe0e9377e6c73f7a45be4e33db3bd92738545e877131a054c60aec"
+source = "git+ssh://git@github.com/valargroup/zebra.git?rev=f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84#f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84"
 dependencies = [
  "color-eyre",
  "futures",

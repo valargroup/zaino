@@ -149,3 +149,13 @@ lazy_static = "1.5.0"
 [profile.test]
 opt-level = 3
 debug = true
+
+# NU7 testnet: build against the valargroup/zebra fork (NSM + LTS pool + NU7).
+# The fork keeps the published version numbers (7.0.0/6.0.0/7.0.0) but changes
+# the crate contents, so we redirect the crates.io deps to the pinned fork rev.
+# Uses the ssh URL so it resolves with the local SSH agent (and an ssh-agent
+# deploy key in CI); cargo fetches via the git CLI (see .cargo/config.toml).
+[patch.crates-io]
+zebra-chain = { git = "ssh://git@github.com/valargroup/zebra.git", rev = "f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84" }
+zebra-state = { git = "ssh://git@github.com/valargroup/zebra.git", rev = "f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84" }
+zebra-rpc   = { git = "ssh://git@github.com/valargroup/zebra.git", rev = "f26fed0a26c8e127cf4a5d9feb4ff22cd90e7d84" }

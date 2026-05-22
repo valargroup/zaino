@@ -8,7 +8,11 @@
 /integration-tests/target/*
 !/integration-tests/chain_cache/testnet_get_subtree_roots_sapling
 !/integration-tests/chain_cache/testnet_get_subtree_roots_orchard
-.cargo
+.cargo/*
+# NU7 branch: the workspace cargo config (rustflags + git-fetch-with-cli) is
+# tracked so the fork's cfg flags reach CI and fresh clones. Local secrets like
+# .cargo/credentials.toml stay ignored.
+!.cargo/config.toml
 .local/
 .failed-tests
 **/proptest-regressions/**

@@ -1,0 +1,21 @@
+# NU7 testnet branch configuration.
+#
+# These rustc cfgs gate the NU7 / ZIP-235 / NSM consensus paths in the
+# valargroup/zebra fork and in librustzcash. They MUST match the flags the
+# network's zebra nodes are built with, otherwise zaino's embedded read-state
+# would parse/validate NU7 blocks differently from the chain it indexes.
+#
+# Single source of truth: keep these here rather than in a RUSTFLAGS env var.
+# A RUSTFLAGS env var fully OVERRIDES (does not merge with) [build].rustflags,
+# so do not set RUSTFLAGS anywhere in CI or the release workflow.
+[build]
+rustflags = [
+    "--cfg", "zcash_unstable=\"nu7\"",
+    "--cfg", "zcash_unstable=\"zip235\"",
+    "--cfg", "zcash_unstable=\"nsm\"",
+]
+
+# Fetch git dependencies (the zebra fork patch) with the git CLI so they resolve
+# against the local SSH agent / an ssh-agent in CI rather than libgit2.
+[net]
+git-fetch-with-cli = true
