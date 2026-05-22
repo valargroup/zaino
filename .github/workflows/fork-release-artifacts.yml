@@ -32,8 +32,9 @@ env:
   RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
   TRIPLE: x86_64-unknown-linux-gnu
   # Resolve the private valargroup/zebra cargo git dependency via the git CLI
-  # (so it uses the ssh-agent key below). Redundant with .cargo/config.toml,
-  # set here too so it applies before the working dir is entered.
+  # (so the url.insteadOf rewrite configured below supplies the fork's token).
+  # Redundant with .cargo/config.toml, set here too so it applies before the
+  # working dir is entered.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # rocksdb's vendored headers don't include <cstdint>; harmless on older GCC,
   # required if the runner image ships GCC 13+.
@@ -50,18 +51,18 @@ jobs:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
           persist-credentials: false
 
-      # SSH key with read access to the private valargroup/zebra fork that the
-      # [patch.crates-io] in Cargo.toml points at. Add the key as the
-      # VALAR_ZEBRA_SSH_KEY repo secret (a deploy key on valargroup/zebra works).
-      - name: Authenticate to the zebra fork (cargo git dependency)
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.VALAR_ZEBRA_SSH_KEY }}
-
-      - name: Trust github.com host key
+      # Fine-grained PAT (Contents: Read) scoped to valargroup/zebra — the
+      # private fork that [patch.crates-io] in Cargo.toml points at. Store it as
+      # the VALAR_ZEBRA_TOKEN repo secret. We rewrite the patch's ssh:// URL to
+      # an authenticated https URL for that one repo, so cargo (via the git CLI)
+      # can fetch it. Local dev keeps using the ssh:// URL with an SSH agent.
+      - name: Configure git auth for the private zebra fork
+        env:
+          ZEBRA_TOKEN: ${{ secrets.VALAR_ZEBRA_TOKEN }}
         run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global \
+            url."https://x-access-token:${ZEBRA_TOKEN}@github.com/valargroup/zebra".insteadOf \
+            "ssh://git@github.com/valargroup/zebra"
 
       - name: Install build dependencies
         run: |
