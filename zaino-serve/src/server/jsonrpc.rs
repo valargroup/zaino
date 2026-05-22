@@ -62,7 +62,10 @@ impl JsonRpcServer {
         };
 
         // Set up Zebra HTTP request compatibility middleware (handles auth and content-type issues)
-        let http_middleware_layer = HttpRequestMiddlewareLayer::new(cookie);
+        let http_middleware_layer = HttpRequestMiddlewareLayer::new(
+            cookie,
+            (zebra_chain::block::MAX_BLOCK_BYTES as usize) * 2 + 1024,
+        );
 
         // Set up Zebra JSON-RPC call compatibility middleware (RPC version fixes)
         let rpc_middleware = RpcServiceBuilder::new()

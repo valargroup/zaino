@@ -855,6 +855,7 @@ impl StateServiceSubscriber {
                         Some(header_obj.block_commitments()),
                         Some(header_obj.final_sapling_root()),
                         final_orchard_root,
+                        transactions_response.len(),
                         transactions_response,
                         Some(header_obj.time()),
                         Some(header_obj.nonce()),

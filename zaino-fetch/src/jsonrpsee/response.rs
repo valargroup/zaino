@@ -198,7 +198,7 @@ pub struct GetBlockchainInfoResponse {
 
     /// Value pool balances
     #[serde(rename = "valuePools")]
-    value_pools: [ChainBalance; 5],
+    value_pools: [ChainBalance; 6],
 
     /// Branch IDs of the current and upcoming consensus rules
     pub consensus: zebra_rpc::methods::TipConsensusBranch,
@@ -353,6 +353,7 @@ impl<'de> Deserialize<'de> for ChainBalance {
             "lockbox" | "deferred" => Ok(ChainBalance(GetBlockchainInfoBalance::deferred(
                 amount, None,
             ))),
+            "lts" => Ok(ChainBalance(GetBlockchainInfoBalance::lts(amount, None))),
             "" => Ok(ChainBalance(GetBlockchainInfoBalance::chain_supply(
                 // The pools are immediately summed internally, which pool we pick doesn't matter here
                 ValueBalance::from_transparent_amount(amount),
@@ -832,7 +833,7 @@ pub struct BlockObject {
     /// Value pool balances
     ///
     #[serde(rename = "valuePools")]
-    value_pools: Option<[ChainBalance; 5]>,
+    value_pools: Option<[ChainBalance; 6]>,
 
     /// Information about the note commitment trees.
     pub trees: GetBlockTrees,
@@ -863,6 +864,7 @@ impl TryFrom<GetBlockResponse> for zebra_rpc::methods::GetBlock {
                 Ok(zebra_rpc::methods::GetBlock::Raw(serialized_block.0))
             }
             GetBlockResponse::Object(block) => {
+                let n_tx = block.tx.len();
                 let tx_ids: Result<Vec<_>, _> = block
                     .tx
                     .into_iter()
@@ -883,6 +885,7 @@ impl TryFrom<GetBlockResponse> for zebra_rpc::methods::GetBlock {
                         block.block_commitments,
                         block.final_sapling_root,
                         block.final_orchard_root,
+                        n_tx,
                         tx_ids?,
                         block.time,
                         block.nonce,
@@ -891,8 +894,15 @@ impl TryFrom<GetBlockResponse> for zebra_rpc::methods::GetBlock {
                         block.difficulty,
                         block.chain_supply.map(|supply| supply.0),
                         block.value_pools.map(
-                            |[transparent, sprout, sapling, orchard, deferred]| {
-                                [transparent.0, sprout.0, sapling.0, orchard.0, deferred.0]
+                            |[transparent, sprout, sapling, orchard, deferred, lts]| {
+                                [
+                                    transparent.0,
+                                    sprout.0,
+                                    sapling.0,
+                                    orchard.0,
+                                    deferred.0,
+                                    lts.0,
+                                ]
                             },
                         ),
                         block.trees.into(),

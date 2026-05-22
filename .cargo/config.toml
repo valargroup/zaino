@@ -1,0 +1,12 @@
+# Build configuration for the valargroup/zebra NU7 testnet.
+#
+# librustzcash gates NU7 / ZIP-235 / NSM (the "lts" value pool) consensus code
+# behind the `zcash_unstable` cfg. The valargroup/zebra NU7 testnet release is
+# built with these same flags, so Zaino must match in order to deserialize NU7
+# blocks (whose consensus branch id is the 0xffffffff placeholder).
+[build]
+rustflags = [
+    "--cfg", "zcash_unstable=\"nu7\"",
+    "--cfg", "zcash_unstable=\"zip235\"",
+    "--cfg", "zcash_unstable=\"nsm\"",
+]
