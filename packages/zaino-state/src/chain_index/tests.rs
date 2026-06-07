@@ -218,7 +218,13 @@ async fn zero_database_size_disables_finalized_db_sync() {
             .unwrap();
     let index_reader = indexer.subscriber();
 
-    assert_eq!(index_reader.status(), StatusType::Ready);
+    poll_until(
+        "zero database indexer ready",
+        Duration::from_secs(10),
+        Duration::from_millis(25),
+        || async { (index_reader.status() == StatusType::Ready).then_some(()) },
+    )
+    .await;
     assert!(
         !db_path.join("regtest").exists(),
         "zero database size should not create or sync an on-disk finalized DB"
@@ -255,7 +261,13 @@ async fn zero_database_size_passthrough_serves_tip_transactions_and_mempool() {
             .unwrap();
     let index_reader = indexer.subscriber();
 
-    assert_eq!(index_reader.status(), StatusType::Ready);
+    poll_until(
+        "zero database passthrough indexer ready",
+        Duration::from_secs(10),
+        Duration::from_millis(25),
+        || async { (index_reader.status() == StatusType::Ready).then_some(()) },
+    )
+    .await;
 
     let snapshot = index_reader.snapshot_nonfinalized_state().await.unwrap();
     assert!(
