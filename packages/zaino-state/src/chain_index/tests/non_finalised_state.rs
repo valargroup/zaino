@@ -48,6 +48,8 @@ async fn nfs_lowest_block_matches_finalized_db_tip() {
 
     let finalized_db_tip_block = index_reader
         .finalized_state
+        .as_ref()
+        .expect("harness uses a finalized DB")
         .get_chain_block_by_height(seam_height)
         .await
         .expect("read finalized DB")

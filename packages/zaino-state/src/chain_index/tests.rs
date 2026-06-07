@@ -26,7 +26,11 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tokio::time::Duration;
-use zaino_common::{network::ActivationHeights, DatabaseConfig, Network, StorageConfig};
+use zaino_common::{
+    network::ActivationHeights, DatabaseConfig, DatabaseSize, Network, StorageConfig,
+};
+use zaino_proto::proto::utils::PoolTypeFilter;
+use zebra_state::HashOrHeight;
 
 use crate::{
     chain_index::{
@@ -39,6 +43,7 @@ use crate::{
         },
         ChainIndex, NodeBackedChainIndex, NodeBackedChainIndexSubscriber, SyncTimings,
     },
+    status::{Status as _, StatusType},
     BlockCacheConfig,
 };
 
@@ -178,6 +183,55 @@ async fn load_with_settings(
 /// `copy_dir_recursive`); the seed itself is never mutated after first build.
 static V1_SEED_ACTIVE: OnceCell<TempDir> = OnceCell::const_new();
 static V1_SEED_STATIC: OnceCell<TempDir> = OnceCell::const_new();
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_database_size_disables_finalized_db_sync() {
+    init_tracing();
+
+    let blocks = load_test_vectors().unwrap().blocks;
+    let source = build_mockchain_source(blocks);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().to_path_buf();
+
+    let config = BlockCacheConfig {
+        storage: StorageConfig {
+            database: DatabaseConfig {
+                path: db_path.clone(),
+                size: DatabaseSize(0),
+            },
+            ..Default::default()
+        },
+        db_version: 1,
+        network: Network::Regtest(ActivationHeights::default()),
+    };
+
+    let indexer =
+        NodeBackedChainIndex::new_with_sync_timings(source.clone(), config, SyncTimings::fast())
+            .await
+            .unwrap();
+    let index_reader = indexer.subscriber();
+
+    assert_eq!(index_reader.status(), StatusType::Ready);
+    assert!(
+        !db_path.join("regtest").exists(),
+        "zero database size should not create or sync an on-disk finalized DB"
+    );
+
+    let tip = index_reader.best_tip_from_source().await.unwrap();
+    assert_eq!(tip.height.0, source.active_height());
+
+    let compact_block = index_reader
+        .get_compact_block_from_source(
+            HashOrHeight::Height(zebra_chain::block::Height(source.active_height())),
+            &PoolTypeFilter::includes_all(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(compact_block.height, u64::from(source.active_height()));
+
+    indexer.shutdown().await.unwrap();
+}
 
 async fn v1_finalised_seed_dir(mode: MockchainMode) -> &'static Path {
     let cell = match mode {

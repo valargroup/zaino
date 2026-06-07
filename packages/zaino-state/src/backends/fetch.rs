@@ -799,13 +799,14 @@ impl ZcashIndexer for FetchServiceSubscriber {
     }
 
     async fn chain_height(&self) -> Result<Height, Self::Error> {
-        Ok(Height(
-            self.indexer
-                .snapshot_nonfinalized_state()
-                .await?
-                .max_serviceable_height()
-                .0,
-        ))
+        match self.indexer.snapshot_nonfinalized_state().await? {
+            ChainIndexSnapshot::NonFinalizedStateExists {
+                non_finalized_snapshot,
+            } => Ok(Height(non_finalized_snapshot.best_tip.height.0)),
+            ChainIndexSnapshot::StillSyncingFinalizedState { .. } => {
+                Ok(Height(self.indexer.best_tip_from_source().await?.height.0))
+            }
+        }
     }
     /// Returns the transaction ids made by the provided transparent addresses.
     ///
@@ -890,10 +891,7 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                 non_finalized_snapshot,
             } => Ok(non_finalized_snapshot.best_tip.to_wire()),
             ChainIndexSnapshot::StillSyncingFinalizedState { .. } => {
-                // TODO: This probably shouldn't be an error.
-                // this is an improvement over previous behaviour of reporting
-                // the genesis block
-                Err(FetchServiceError::UnavailableNotSyncedEnough)
+                Ok(self.indexer.best_tip_from_source().await?.to_wire())
             }
         }
         // dbg!(&tip);
@@ -928,10 +926,15 @@ impl LightWalletIndexer for FetchServiceSubscriber {
         };
 
         let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
-            // TODO: This probably shouldn't be an error.
-            // this is an improvement over previous behaviour of
-            // acting as if we are only synced to the genesis block
-            return Err(FetchServiceError::UnavailableNotSyncedEnough);
+            return self
+                .indexer
+                .get_compact_block_from_source(hash_or_height, &PoolTypeFilter::includes_all())
+                .await?
+                .ok_or_else(|| {
+                    FetchServiceError::TonicStatusError(tonic::Status::out_of_range(format!(
+                        "Error: Block out of range [{hash_or_height}]."
+                    )))
+                });
         };
 
         match self
@@ -1008,10 +1011,16 @@ impl LightWalletIndexer for FetchServiceSubscriber {
             }
         };
         let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
-            // TODO: This probably shouldn't be an error.
-            // this is an improvement over previous behaviour of
-            // acting as if we are only synced to the genesis block
-            return Err(FetchServiceError::UnavailableNotSyncedEnough);
+            return self
+                .indexer
+                .get_compact_block_from_source(hash_or_height, &PoolTypeFilter::includes_all())
+                .await?
+                .map(compact_block_to_nullifiers)
+                .ok_or_else(|| {
+                    FetchServiceError::TonicStatusError(tonic::Status::out_of_range(format!(
+                        "Error: Block out of range [{hash_or_height}]."
+                    )))
+                });
         };
         match self
             .indexer
@@ -1109,17 +1118,55 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                 time::Duration::from_secs((service_timeout * 4) as u64),
                 async {
                     let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
-                        // TODO: This probably shouldn't be an error.
-                        // this is an improvement over previous behaviour of
-                        // acting as if we are only synced to the genesis block
-                        if let Err(e) = channel_tx
-                            .send(Err(tonic::Status::failed_precondition(
-                                "zaino not yet synced".to_string(),
-                            )))
-                            .await
+                        let best_tip = match fetch_service_clone.indexer.best_tip_from_source().await
                         {
-                            warn!("GetBlockRange channel closed unexpectedly: {}", e);
+                            Ok(best_tip) => best_tip,
+                            Err(e) => {
+                                let _ = channel_tx
+                                    .send(Err(tonic::Status::unknown(e.to_string())))
+                                    .await;
+                                return;
+                            }
                         };
+                        let capped_end = std::cmp::min(end, best_tip.height.0);
+                        for height in start..=capped_end {
+                            match fetch_service_clone
+                                .indexer
+                                .get_compact_block_from_source(
+                                    HashOrHeight::Height(Height(height)),
+                                    &pool_type_filter,
+                                )
+                                .await
+                            {
+                                Ok(Some(block)) => {
+                                    if channel_tx.send(Ok(block)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                Ok(None) => {
+                                    let _ = channel_tx
+                                        .send(Err(tonic::Status::unknown(format!(
+                                            "Error: Failed to retrieve block at height [{height}]."
+                                        ))))
+                                        .await;
+                                    return;
+                                }
+                                Err(e) => {
+                                    let _ = channel_tx
+                                        .send(Err(tonic::Status::unknown(e.to_string())))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        if end > best_tip.height.0 {
+                            let _ = channel_tx
+                                .send(Err(tonic::Status::out_of_range(format!(
+                                    "Error: Height out of range [{end}]. Height requested is greater than the best chain tip [{}].",
+                                    best_tip.height.0
+                                ))))
+                                .await;
+                        }
                         return;
                     };
                     // Use the snapshot tip directly, as this function doesn't support passthrough
@@ -1242,17 +1289,59 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                 time::Duration::from_secs((service_timeout * 4) as u64),
                 async {
                     let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
-                        // TODO: This probably shouldn't be an error.
-                        // this is an improvement over previous behaviour of
-                        // acting as if we are only synced to the genesis block
-                        if let Err(e) = channel_tx
-                            .send(Err(tonic::Status::failed_precondition(
-                                "zaino not yet synced".to_string(),
-                            )))
-                            .await
+                        let best_tip = match fetch_service_clone.indexer.best_tip_from_source().await
                         {
-                            warn!("GetBlockRangeNullifiers channel closed unexpectedly: {}", e);
+                            Ok(best_tip) => best_tip,
+                            Err(e) => {
+                                let _ = channel_tx
+                                    .send(Err(tonic::Status::unknown(e.to_string())))
+                                    .await;
+                                return;
+                            }
                         };
+                        let capped_end = std::cmp::min(end, best_tip.height.0);
+                        for height in start..=capped_end {
+                            match fetch_service_clone
+                                .indexer
+                                .get_compact_block_from_source(
+                                    HashOrHeight::Height(Height(height)),
+                                    &pool_type_filter,
+                                )
+                                .await
+                            {
+                                Ok(Some(block)) => {
+                                    if channel_tx
+                                        .send(Ok(compact_block_to_nullifiers(block)))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                                Ok(None) => {
+                                    let _ = channel_tx
+                                        .send(Err(tonic::Status::unknown(format!(
+                                            "Error: Failed to retrieve block at height [{height}]."
+                                        ))))
+                                        .await;
+                                    return;
+                                }
+                                Err(e) => {
+                                    let _ = channel_tx
+                                        .send(Err(tonic::Status::unknown(e.to_string())))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        if end > best_tip.height.0 {
+                            let _ = channel_tx
+                                .send(Err(tonic::Status::out_of_range(format!(
+                                    "Error: Height out of range [{end}]. Height requested is greater than the best chain tip [{}].",
+                                    best_tip.height.0
+                                ))))
+                                .await;
+                        }
                         return;
                     };
 

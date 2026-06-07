@@ -659,7 +659,7 @@ pub struct NodeBackedChainIndex<Source: BlockchainSource = ValidatorConnector> {
     #[allow(dead_code)]
     mempool: std::sync::Arc<mempool::Mempool<Source>>,
     non_finalized_state: Arc<ArcSwapOption<crate::NonFinalizedState<Source>>>,
-    finalized_db: std::sync::Arc<finalised_state::ZainoDB>,
+    finalized_db: Option<std::sync::Arc<finalised_state::ZainoDB>>,
     sync_loop_handle: Option<tokio::task::JoinHandle<Result<(), SyncError>>>,
     status: NamedAtomicStatus,
     network: ZebraNetwork,
@@ -746,8 +746,15 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
     ) -> Result<Self, crate::InitError> {
         use futures::TryFutureExt as _;
 
-        let finalized_db =
-            Arc::new(finalised_state::ZainoDB::spawn(config.clone(), source.clone()).await?);
+        let use_finalized_db = config.storage.database.size.0 != 0;
+        let finalized_db = if use_finalized_db {
+            Some(Arc::new(
+                finalised_state::ZainoDB::spawn(config.clone(), source.clone()).await?,
+            ))
+        } else {
+            info!("Persistent finalized chain index disabled because database size is zero");
+            None
+        };
         let mempool_state = mempool::Mempool::spawn(source.clone(), None)
             .map_err(crate::InitError::MempoolInitialzationError)
             .await?;
@@ -763,7 +770,11 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
             sync_timings,
             cancel_token: CancellationToken::new(),
         };
-        chain_index.sync_loop_handle = Some(chain_index.start_sync_loop());
+        if use_finalized_db {
+            chain_index.sync_loop_handle = Some(chain_index.start_sync_loop());
+        } else {
+            chain_index.status.store(StatusType::Ready);
+        }
 
         Ok(chain_index)
     }
@@ -774,7 +785,7 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
         NodeBackedChainIndexSubscriber {
             mempool: self.mempool.subscriber(),
             non_finalized_state: self.non_finalized_state.clone(),
-            finalized_state: self.finalized_db.to_reader(),
+            finalized_state: self.finalized_db.as_ref().map(|db| db.to_reader()),
             status: self.status.clone(),
             network: self.network.clone(),
             source: self.source.clone(),
@@ -796,14 +807,20 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
     pub async fn shutdown(&self) -> Result<(), FinalisedStateError> {
         self.cancel_token.cancel();
         self.status.store(StatusType::Closing);
-        self.finalized_db.shutdown().await?;
+        if let Some(finalized_db) = &self.finalized_db {
+            finalized_db.shutdown().await?;
+        }
         self.mempool.close();
         Ok(())
     }
 
     /// Displays the status of the chain_index
     pub fn status(&self) -> StatusType {
-        let finalized_status = self.finalized_db.status();
+        let finalized_status = self
+            .finalized_db
+            .as_ref()
+            .map(|db| db.status())
+            .unwrap_or(StatusType::Ready);
         let mempool_status = self.mempool.status();
         let combined_status = self
             .status
@@ -818,7 +835,10 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
     pub(super) fn start_sync_loop(&self) -> tokio::task::JoinHandle<Result<(), SyncError>> {
         info!("Starting ChainIndex sync loop");
         let nfs = self.non_finalized_state.clone();
-        let fs = self.finalized_db.clone();
+        let fs = self
+            .finalized_db
+            .clone()
+            .expect("sync loop only starts when finalized DB is enabled");
         let status = self.status.clone();
         let source = self.source.clone();
         let network = self.network.clone();
@@ -993,7 +1013,7 @@ impl<Source: BlockchainSource> Drop for NodeBackedChainIndex<Source> {
 pub struct NodeBackedChainIndexSubscriber<Source: BlockchainSource = ValidatorConnector> {
     mempool: mempool::MempoolSubscriber,
     non_finalized_state: Arc<ArcSwapOption<crate::NonFinalizedState<Source>>>,
-    finalized_state: finalised_state::reader::DbReader,
+    finalized_state: Option<finalised_state::reader::DbReader>,
     status: NamedAtomicStatus,
     network: ZebraNetwork,
     source: Source,
@@ -1002,11 +1022,15 @@ pub struct NodeBackedChainIndexSubscriber<Source: BlockchainSource = ValidatorCo
 async fn compact_block_from_source<Source: BlockchainSource>(
     source: &Source,
     network: ZebraNetwork,
-    height: types::Height,
+    id: HashOrHeight,
     pool_types: &PoolTypeFilter,
 ) -> Result<Option<zaino_proto::proto::compact_formats::CompactBlock>, ChainIndexError> {
+    let expected_height = match id {
+        HashOrHeight::Height(height) => Some(types::Height(height.0)),
+        HashOrHeight::Hash(_) => None,
+    };
     let Some(block) = source
-        .get_block(HashOrHeight::Height(zebra_chain::block::Height(height.0)))
+        .get_block(id)
         .await
         .map_err(ChainIndexError::backing_validator)?
     else {
@@ -1022,14 +1046,16 @@ async fn compact_block_from_source<Source: BlockchainSource>(
                 "validator returned a block without a height",
             ))
         })?;
-    if block_height != height {
-        return Err(ChainIndexError::backing_validator(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "validator returned block at height {}, expected {}",
-                block_height.0, height.0
-            ),
-        )));
+    if let Some(expected_height) = expected_height {
+        if block_height != expected_height {
+            return Err(ChainIndexError::backing_validator(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "validator returned block at height {}, expected {}",
+                    block_height.0, expected_height.0
+                ),
+            )));
+        }
     }
 
     let tree_roots = source
@@ -1077,9 +1103,50 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
         &self.source
     }
 
+    pub(crate) async fn best_tip_from_source(&self) -> Result<BlockIndex, ChainIndexError> {
+        let height = self
+            .source()
+            .get_best_block_height()
+            .await
+            .map_err(ChainIndexError::backing_validator)?
+            .ok_or_else(|| {
+                ChainIndexError::backing_validator(std::io::Error::other(
+                    "node returned no best block height",
+                ))
+            })?;
+        let Some(block) = self
+            .source()
+            .get_block(HashOrHeight::Height(height))
+            .await
+            .map_err(ChainIndexError::backing_validator)?
+        else {
+            return Err(ChainIndexError::database_hole(
+                types::Height(height.0),
+                None,
+            ));
+        };
+
+        Ok(BlockIndex {
+            height: types::Height(height.0),
+            hash: block.hash().into(),
+        })
+    }
+
+    pub(crate) async fn get_compact_block_from_source(
+        &self,
+        id: HashOrHeight,
+        pool_types: &PoolTypeFilter,
+    ) -> Result<Option<zaino_proto::proto::compact_formats::CompactBlock>, ChainIndexError> {
+        compact_block_from_source(self.source(), self.network.clone(), id, pool_types).await
+    }
+
     /// Returns the combined status of all chain index components.
     pub fn combined_status(&self) -> StatusType {
-        let finalized_status = self.finalized_state.status();
+        let finalized_status = self
+            .finalized_state
+            .as_ref()
+            .map(|state| state.status())
+            .unwrap_or(StatusType::Ready);
         let mempool_status = self.mempool.status();
         let combined_status = self
             .status
@@ -1099,8 +1166,11 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
         &self,
         txid: TransactionHash,
     ) -> Result<u64, ChainIndexError> {
-        let Some(tx_location) = self
-            .finalized_state
+        let Some(finalized_state) = &self.finalized_state else {
+            return Ok(0);
+        };
+
+        let Some(tx_location) = finalized_state
             .get_tx_location(&txid)
             .await
             .map_err(|e| ChainIndexError::internal(e.to_string()))?
@@ -1108,8 +1178,7 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
             return Ok(0);
         };
 
-        let Some(transparent) = self
-            .finalized_state
+        let Some(transparent) = finalized_state
             .get_transparent(tx_location)
             .await
             .map_err(|e| ChainIndexError::internal(e.to_string()))?
@@ -1133,8 +1202,7 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
             return Ok(0);
         }
 
-        let spenders = self
-            .finalized_state
+        let spenders = finalized_state
             .get_outpoint_spenders(outpoints)
             .await
             .map_err(|e| ChainIndexError::internal(e.to_string()))?;
@@ -1162,7 +1230,13 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
         height: types::Height,
         pool_types: &PoolTypeFilter,
     ) -> Result<Option<zaino_proto::proto::compact_formats::CompactBlock>, ChainIndexError> {
-        compact_block_from_source(self.source(), self.network.clone(), height, pool_types).await
+        compact_block_from_source(
+            self.source(),
+            self.network.clone(),
+            HashOrHeight::Height(zebra_chain::block::Height(height.0)),
+            pool_types,
+        )
+        .await
     }
 
     async fn get_indexed_block_height(
@@ -1179,12 +1253,13 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
                 .find(|h| **h == hash)
                 // Canonical height is None for blocks not on the best chain
                 .map(|_| block.context.index.height)),
-            None => self
-                // ChainIndex step 4:
-                .finalized_state
-                .get_block_height(hash)
-                .await
-                .map_err(|e| ChainIndexError::database_hole(hash, Some(Box::new(e)))),
+            None => match &self.finalized_state {
+                Some(finalized_state) => finalized_state
+                    .get_block_height(hash)
+                    .await
+                    .map_err(|e| ChainIndexError::database_hole(hash, Some(Box::new(e)))),
+                None => Ok(None),
+            },
         }
     }
 
@@ -1203,20 +1278,22 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
         'snapshot: 'iter,
         'self_lt: 'iter,
     {
-        let finalized_blocks_containing_transaction = match self
-            .finalized_state
-            .get_tx_location(&types::TransactionHash(txid))
-            .await?
-        {
-            Some(tx_location) => {
-                self.finalized_state
-                    .get_chain_block_by_height(crate::Height(tx_location.block_height()))
+        let finalized_blocks_containing_transaction =
+            if let Some(finalized_state) = &self.finalized_state {
+                match finalized_state
+                    .get_tx_location(&types::TransactionHash(txid))
                     .await?
-            }
-
-            None => None,
-        }
-        .into_iter();
+                {
+                    Some(tx_location) => finalized_state
+                        .get_chain_block_by_height(crate::Height(tx_location.block_height()))
+                        .await?
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
         let non_finalized_blocks_containing_transaction =
             snapshot.blocks.values().filter_map(move |block| {
                 block.transactions().iter().find_map(|transaction| {
@@ -1228,6 +1305,7 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
                 })
             });
         Ok(finalized_blocks_containing_transaction
+            .into_iter()
             .chain(non_finalized_blocks_containing_transaction))
     }
 
@@ -1385,11 +1463,21 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
             {
                 Some(block_hash) => Ok(Some(block_hash)),
                 // If not found check finalised state.
-                None => self
-                    .finalized_state
-                    .get_block_hash(height)
-                    .await
-                    .map_err(Into::into),
+                None => match &self.finalized_state {
+                    Some(finalized_state) => finalized_state
+                        .get_block_hash(height)
+                        .await
+                        .map_err(Into::into),
+                    None => match self
+                        .source()
+                        .get_block(HashOrHeight::Height(height.into()))
+                        .await
+                        .map_err(ChainIndexError::backing_validator)?
+                    {
+                        Some(block) => Ok(Some(block.hash().into())),
+                        None => Ok(None),
+                    },
+                },
             },
 
             ChainIndexSnapshot::StillSyncingFinalizedState {
@@ -1431,10 +1519,12 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
         match snapshot.get_chainblock_by_hash(target_hash) {
             Some(block) => Ok(Some(block.clone())),
             None => match self.get_block_height(snapshot, *target_hash).await {
-                Ok(Some(height)) => Ok(self
-                    .finalized_state
-                    .get_chain_block_by_height(height)
-                    .await?),
+                Ok(Some(height)) => match &self.finalized_state {
+                    Some(finalized_state) => {
+                        Ok(finalized_state.get_chain_block_by_height(height).await?)
+                    }
+                    None => Ok(None),
+                },
                 Ok(None) => Ok(None),
                 Err(e) => Err(e),
             },
@@ -1454,10 +1544,12 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
     ) -> Result<Option<IndexedBlock>, Self::Error> {
         match snapshot.get_chainblock_by_height(target_height) {
             Some(block) => Ok(Some(block.clone())),
-            None => Ok(self
-                .finalized_state
-                .get_chain_block_by_height(*target_height)
-                .await?),
+            None => match &self.finalized_state {
+                Some(finalized_state) => Ok(finalized_state
+                    .get_chain_block_by_height(*target_height)
+                    .await?),
+                None => Ok(None),
+            },
         }
     }
 
@@ -1485,41 +1577,53 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                 futures::stream::iter((start.0)..=(end.0)).then(move |height| async move {
                     // For blocks above validator_finalized_height, it's not reorg-safe to get blocks by height. It is reorg-safe to get blocks by hash. What we need to do in this case is use our snapshot index to look up the hash at a given height, and then get that hash from the validator.
                     // This is why we now look in the index.
-                    match self
-                        .finalized_state
-                        .get_block_hash(types::Height(height))
-                        .await
-                    {
-                        Ok(Some(hash)) => {
-                            return self
-                                .get_fullblock_bytes_from_node(HashOrHeight::Hash(hash.into()))
-                                .await?
-                                .ok_or(ChainIndexError::database_hole(hash, None))
-                        }
-                        Err(e) => Err(ChainIndexError {
-                            kind: ChainIndexErrorKind::InternalServerError,
-                            message: "".to_string(),
-                            source: Some(Box::new(e)),
-                        }),
-                        Ok(None) => {
-                            match snapshot.get_chainblock_by_height(&types::Height(height)) {
-                                Some(block) => {
+                    match &self.finalized_state {
+                        Some(finalized_state) => {
+                            match finalized_state.get_block_hash(types::Height(height)).await {
+                                Ok(Some(hash)) => {
                                     return self
                                         .get_fullblock_bytes_from_node(HashOrHeight::Hash(
-                                            (*block.hash()).into(),
+                                            hash.into(),
                                         ))
                                         .await?
-                                        .ok_or(ChainIndexError::database_hole(block.hash(), None))
+                                        .ok_or(ChainIndexError::database_hole(hash, None))
                                 }
-                                None => self
-                                    // usually getting by height is not reorg-safe, but here, height is known to be below or equal to validator_finalized_height.
-                                    .get_fullblock_bytes_from_node(HashOrHeight::Height(
-                                        zebra_chain::block::Height(height),
-                                    ))
-                                    .await?
-                                    .ok_or(ChainIndexError::database_hole(height, None)),
+                                Err(e) => Err(ChainIndexError {
+                                    kind: ChainIndexErrorKind::InternalServerError,
+                                    message: "".to_string(),
+                                    source: Some(Box::new(e)),
+                                }),
+                                Ok(None) => {
+                                    match snapshot.get_chainblock_by_height(&types::Height(height))
+                                    {
+                                        Some(block) => {
+                                            return self
+                                                .get_fullblock_bytes_from_node(HashOrHeight::Hash(
+                                                    (*block.hash()).into(),
+                                                ))
+                                                .await?
+                                                .ok_or(ChainIndexError::database_hole(
+                                                    block.hash(),
+                                                    None,
+                                                ))
+                                        }
+                                        None => self
+                                            // usually getting by height is not reorg-safe, but here, height is known to be below or equal to validator_finalized_height.
+                                            .get_fullblock_bytes_from_node(HashOrHeight::Height(
+                                                zebra_chain::block::Height(height),
+                                            ))
+                                            .await?
+                                            .ok_or(ChainIndexError::database_hole(height, None)),
+                                    }
+                                }
                             }
                         }
+                        None => self
+                            .get_fullblock_bytes_from_node(HashOrHeight::Height(
+                                zebra_chain::block::Height(height),
+                            ))
+                            .await?
+                            .ok_or(ChainIndexError::database_hole(height, None)),
                     }
                 }),
             )
@@ -1561,19 +1665,24 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                             block.to_compact_block(),
                             &pool_types.to_pool_types_vector(),
                         ),
-                        None => {
-                            match self
-                                .finalized_state
-                                .get_compact_block(height, pool_types.clone())
-                                .await
-                            {
-                                Ok(block) => block,
-                                Err(_) => self
-                                    .get_compact_block_from_node(height, &pool_types)
-                                    .await?
-                                    .ok_or(ChainIndexError::database_hole(height, None))?,
+                        None => match &self.finalized_state {
+                            Some(finalized_state) => {
+                                match finalized_state
+                                    .get_compact_block(height, pool_types.clone())
+                                    .await
+                                {
+                                    Ok(block) => block,
+                                    Err(_) => self
+                                        .get_compact_block_from_node(height, &pool_types)
+                                        .await?
+                                        .ok_or(ChainIndexError::database_hole(height, None))?,
+                                }
                             }
-                        }
+                            None => self
+                                .get_compact_block_from_node(height, &pool_types)
+                                .await?
+                                .ok_or(ChainIndexError::database_hole(height, None))?,
+                        },
                     }))
                 } else {
                     Ok(None)
@@ -1581,10 +1690,14 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
             }
 
             ChainIndexSnapshot::StillSyncingFinalizedState {
-                validator_finalized_height: _,
-                //TODO: Once we make chainwork an option field we should be able to
-                // support passthrougth for this
-            } => Ok(None),
+                validator_finalized_height,
+            } => {
+                if height <= *validator_finalized_height {
+                    self.get_compact_block_from_node(height, &pool_types).await
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
@@ -1649,16 +1762,20 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                 ));
 
                 if start_height <= finalized_end_height {
-                    Some(
-                        self.finalized_state
-                            .get_compact_block_stream(
-                                start_height,
-                                finalized_end_height,
-                                pool_types.clone(),
-                            )
-                            .await
-                            .map_err(ChainIndexError::from)?,
-                    )
+                    if let Some(finalized_state) = &self.finalized_state {
+                        Some(
+                            finalized_state
+                                .get_compact_block_stream(
+                                    start_height,
+                                    finalized_end_height,
+                                    pool_types.clone(),
+                                )
+                                .await
+                                .map_err(ChainIndexError::from)?,
+                        )
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -1673,16 +1790,20 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                 types::Height(lowest_nonfinalized_height.0.saturating_sub(1))
             };
 
-            Some(
-                self.finalized_state
-                    .get_compact_block_stream(
-                        finalized_start_height,
-                        end_height,
-                        pool_types.clone(),
-                    )
-                    .await
-                    .map_err(ChainIndexError::from)?,
-            )
+            if let Some(finalized_state) = &self.finalized_state {
+                Some(
+                    finalized_state
+                        .get_compact_block_stream(
+                            finalized_start_height,
+                            end_height,
+                            pool_types.clone(),
+                        )
+                        .await
+                        .map_err(ChainIndexError::from)?,
+                )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1716,7 +1837,7 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                         match compact_block_from_source(
                             &source,
                             network.clone(),
-                            types::Height(height_value),
+                            HashOrHeight::Height(zebra_chain::block::Height(height_value)),
                             &pool_types_for_node,
                         )
                         .await
@@ -1773,7 +1894,7 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                             match compact_block_from_source(
                                 &source,
                                 network.clone(),
-                                types::Height(height_value),
+                                HashOrHeight::Height(zebra_chain::block::Height(height_value)),
                                 &pool_types_for_node,
                             )
                             .await
@@ -2170,13 +2291,20 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                         // the block is NOT non-FINALIZED in the INDEXER.
                         // as the non finalzed state is known to be populated,
                         // we now check the finalized state
-                        match self.finalized_state.get_block_height(*hash).await {
-                            Ok(Some(height)) => {
-                                // the block is FINALIZED in the INDEXER
-                                Ok(Some((*hash, height)))
+                        match &self.finalized_state {
+                            Some(finalized_state) => {
+                                match finalized_state.get_block_height(*hash).await {
+                                    Ok(Some(height)) => {
+                                        // the block is FINALIZED in the INDEXER
+                                        Ok(Some((*hash, height)))
+                                    }
+                                    Err(e) => {
+                                        Err(ChainIndexError::database_hole(hash, Some(Box::new(e))))
+                                    }
+                                    Ok(None) => Ok(None),
+                                }
                             }
-                            Err(e) => Err(ChainIndexError::database_hole(hash, Some(Box::new(e)))),
-                            Ok(None) => Ok(None),
+                            None => Ok(None),
                         }
                     }
                 }
@@ -2372,8 +2500,11 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
             }
         };
 
-        let mut accumulator = self
-            .finalized_state
+        let Some(finalized_state) = &self.finalized_state else {
+            return Ok(GetTxOutSetInfoResponse::Empty(EmptyTxOutSetInfo {}));
+        };
+
+        let mut accumulator = finalized_state
             .get_tx_out_set_info_accumulator()
             .await
             .map_err(|e| {
@@ -2457,8 +2588,7 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                     let prev_out_from_nfs = nfs_created.remove(&outpoint);
                     let prev_out = match prev_out_from_nfs {
                         Some(out) => out,
-                        None => self
-                            .finalized_state
+                        None => finalized_state
                             .get_previous_output(outpoint)
                             .await
                             .map_err(|e| {
