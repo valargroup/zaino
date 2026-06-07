@@ -180,6 +180,7 @@ pub struct GetBlockchainInfoResponse {
     chain_supply: ChainBalance,
 
     /// Status of network upgrades
+    #[serde(deserialize_with = "deserialize_known_network_upgrades")]
     pub upgrades: indexmap::IndexMap<
         zebra_rpc::methods::ConsensusBranchIdHex,
         zebra_rpc::methods::NetworkUpgradeInfo,
@@ -226,6 +227,90 @@ pub struct GetBlockchainInfoResponse {
 
 impl ResponseToError for GetBlockchainInfoResponse {
     type RpcError = Infallible;
+}
+
+fn deserialize_known_network_upgrades<'de, D>(
+    deserializer: D,
+) -> Result<
+    indexmap::IndexMap<
+        zebra_rpc::methods::ConsensusBranchIdHex,
+        zebra_rpc::methods::NetworkUpgradeInfo,
+    >,
+    D::Error,
+>
+where
+    D: Deserializer<'de>,
+{
+    let raw = indexmap::IndexMap::<zebra_rpc::methods::ConsensusBranchIdHex, serde_json::Value>::
+        deserialize(deserializer)?;
+    raw.into_iter()
+        .filter_map(|(branch_id, value)| {
+            if value.get("name").and_then(serde_json::Value::as_str) == Some("NU6.2") {
+                None
+            } else {
+                Some(
+                    serde_json::from_value(value)
+                        .map(|upgrade| (branch_id, upgrade))
+                        .map_err(D::Error::custom),
+                )
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod get_blockchain_info_tests {
+    use super::GetBlockchainInfoResponse;
+
+    #[test]
+    fn parses_get_blockchain_info_with_nu6_2_upgrade() {
+        let json = r#"{
+            "chain": "main",
+            "blocks": 3369999,
+            "bestblockhash": "000000000051e552b6c46c6502b8d34167872c6927ff69ac5e5d04ffba26dbbd",
+            "estimatedheight": 3369999,
+            "chainSupply": {
+                "chainValue": 16755256.4155448,
+                "chainValueZat": 1675525641554480
+            },
+            "upgrades": {
+                "76b809bb": {
+                    "name": "Sapling",
+                    "activationheight": 419200,
+                    "status": "active"
+                },
+                "5437f330": {
+                    "name": "NU6.2",
+                    "activationheight": 3368326,
+                    "status": "active"
+                }
+            },
+            "valuePools": [
+                { "id": "transparent", "chainValue": 11867011.68975186, "chainValueZat": 1186701168975186 },
+                { "id": "sprout", "chainValue": 0.0, "chainValueZat": 0 },
+                { "id": "sapling", "chainValue": 4888244.72579294, "chainValueZat": 488824472579294 },
+                { "id": "orchard", "chainValue": 0.0, "chainValueZat": 0 },
+                { "id": "deferred", "chainValue": 0.0, "chainValueZat": 0 }
+            ],
+            "consensus": {
+                "chaintip": "5437f330",
+                "nextblock": "5437f330"
+            }
+        }"#;
+
+        let parsed: GetBlockchainInfoResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(parsed.upgrades.len(), 1);
+        assert!(parsed
+            .upgrades
+            .values()
+            .any(|upgrade| upgrade.into_parts().0
+                == zebra_chain::parameters::NetworkUpgrade::Sapling));
+        assert_eq!(
+            format!("{:08x}", parsed.consensus.into_parts().0),
+            "5437f330"
+        );
+    }
 }
 
 /// Response to a `getdifficulty` RPC request.
