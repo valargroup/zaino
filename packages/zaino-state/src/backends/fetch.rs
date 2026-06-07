@@ -906,6 +906,18 @@ impl LightWalletIndexer for FetchServiceSubscriber {
         )?;
 
         let snapshot = self.indexer.snapshot_nonfinalized_state().await?;
+        let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
+            return self
+                .indexer
+                .get_compact_block_from_source(hash_or_height, &PoolTypeFilter::includes_all())
+                .await?
+                .ok_or_else(|| {
+                    FetchServiceError::TonicStatusError(tonic::Status::out_of_range(format!(
+                        "Error: Block out of range [{hash_or_height}]."
+                    )))
+                });
+        };
+
         let height = match hash_or_height {
             HashOrHeight::Height(height) => height.0,
             HashOrHeight::Hash(hash) => {
@@ -923,18 +935,6 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                     }
                 }
             }
-        };
-
-        let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
-            return self
-                .indexer
-                .get_compact_block_from_source(hash_or_height, &PoolTypeFilter::includes_all())
-                .await?
-                .ok_or_else(|| {
-                    FetchServiceError::TonicStatusError(tonic::Status::out_of_range(format!(
-                        "Error: Block out of range [{hash_or_height}]."
-                    )))
-                });
         };
 
         match self
@@ -992,6 +992,19 @@ impl LightWalletIndexer for FetchServiceSubscriber {
             )),
         )?;
         let snapshot = self.indexer.snapshot_nonfinalized_state().await?;
+        let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
+            return self
+                .indexer
+                .get_compact_block_from_source(hash_or_height, &PoolTypeFilter::includes_all())
+                .await?
+                .map(compact_block_to_nullifiers)
+                .ok_or_else(|| {
+                    FetchServiceError::TonicStatusError(tonic::Status::out_of_range(format!(
+                        "Error: Block out of range [{hash_or_height}]."
+                    )))
+                });
+        };
+
         let height = match hash_or_height {
             HashOrHeight::Height(height) => height.0,
             HashOrHeight::Hash(hash) => {
@@ -1009,18 +1022,6 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                     }
                 }
             }
-        };
-        let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
-            return self
-                .indexer
-                .get_compact_block_from_source(hash_or_height, &PoolTypeFilter::includes_all())
-                .await?
-                .map(compact_block_to_nullifiers)
-                .ok_or_else(|| {
-                    FetchServiceError::TonicStatusError(tonic::Status::out_of_range(format!(
-                        "Error: Block out of range [{hash_or_height}]."
-                    )))
-                });
         };
         match self
             .indexer
@@ -1467,13 +1468,12 @@ impl LightWalletIndexer for FetchServiceSubscriber {
                 // Zebra returns None for mempool transactions, convert to `Mempool Height`.
                 None => {
                     let snapshot = self.indexer.snapshot_nonfinalized_state().await?;
-                    let Some(non_finalized_snapshot) = snapshot.get_nfs_snapshot() else {
-                        // TODO: This probably shouldn't be an error.
-                        // this is an improvement over previous behaviour of
-                        // acting as if we are only synced to the genesis block
-                        return Err(FetchServiceError::UnavailableNotSyncedEnough);
-                    };
-                    non_finalized_snapshot.best_tip.height.0 as u64
+                    match snapshot.get_nfs_snapshot() {
+                        Some(non_finalized_snapshot) => {
+                            non_finalized_snapshot.best_tip.height.0 as u64
+                        }
+                        None => self.indexer.best_tip_from_source().await?.height.0 as u64,
+                    }
                 }
             };
 

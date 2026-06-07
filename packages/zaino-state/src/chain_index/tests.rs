@@ -19,7 +19,7 @@ pub(crate) fn init_tracing() {
         .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
         .with_target(true)
         .try_init()
-        .unwrap();
+        .ok();
 }
 
 use std::path::{Path, PathBuf};
@@ -37,15 +37,18 @@ use crate::{
         finalised_state::ZainoDB,
         finalized_height_floor,
         source::mockchain_source::MockchainSource,
+        tests::poll::poll_until,
         tests::vectors::{
             build_active_mockchain_source, build_mockchain_source, copy_dir_recursive,
             load_test_vectors, sync_db_with_blockdata,
         },
+        types::{BestChainLocation, Height, TransactionHash},
         ChainIndex, NodeBackedChainIndex, NodeBackedChainIndexSubscriber, SyncTimings,
     },
     status::{Status as _, StatusType},
     BlockCacheConfig,
 };
+use zebra_chain::{parameters::ConsensusBranchId, serialization::ZcashDeserializeInto};
 
 /// Selects which factory the test setup uses to build its `MockchainSource`,
 /// which in turn determines the source's `active_chain_height` and so the
@@ -184,6 +187,20 @@ async fn load_with_settings(
 static V1_SEED_ACTIVE: OnceCell<TempDir> = OnceCell::const_new();
 static V1_SEED_STATIC: OnceCell<TempDir> = OnceCell::const_new();
 
+fn zero_database_config(db_path: PathBuf) -> BlockCacheConfig {
+    BlockCacheConfig {
+        storage: StorageConfig {
+            database: DatabaseConfig {
+                path: db_path,
+                size: DatabaseSize(0),
+            },
+            ..Default::default()
+        },
+        db_version: 1,
+        network: Network::Regtest(ActivationHeights::default()),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_database_size_disables_finalized_db_sync() {
     init_tracing();
@@ -193,17 +210,7 @@ async fn zero_database_size_disables_finalized_db_sync() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().to_path_buf();
 
-    let config = BlockCacheConfig {
-        storage: StorageConfig {
-            database: DatabaseConfig {
-                path: db_path.clone(),
-                size: DatabaseSize(0),
-            },
-            ..Default::default()
-        },
-        db_version: 1,
-        network: Network::Regtest(ActivationHeights::default()),
-    };
+    let config = zero_database_config(db_path.clone());
 
     let indexer =
         NodeBackedChainIndex::new_with_sync_timings(source.clone(), config, SyncTimings::fast())
@@ -229,6 +236,118 @@ async fn zero_database_size_disables_finalized_db_sync() {
         .unwrap()
         .unwrap();
     assert_eq!(compact_block.height, u64::from(source.active_height()));
+
+    indexer.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_database_size_passthrough_serves_tip_transactions_and_mempool() {
+    init_tracing();
+
+    let blocks = load_test_vectors().unwrap().blocks;
+    let source = build_active_mockchain_source(150, blocks.clone());
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = zero_database_config(temp_dir.path().to_path_buf());
+
+    let indexer =
+        NodeBackedChainIndex::new_with_sync_timings(source.clone(), config, SyncTimings::fast())
+            .await
+            .unwrap();
+    let index_reader = indexer.subscriber();
+
+    assert_eq!(index_reader.status(), StatusType::Ready);
+
+    let snapshot = index_reader.snapshot_nonfinalized_state().await.unwrap();
+    assert!(
+        snapshot.get_nfs_snapshot().is_none(),
+        "zero database size should not require a local non-finalized snapshot"
+    );
+
+    let tip_height = source.active_height();
+    let tip_block = &blocks[tip_height as usize].zebra_block;
+    let tip_compact_block = index_reader
+        .get_compact_block_from_source(
+            HashOrHeight::Hash(tip_block.hash()),
+            &PoolTypeFilter::includes_all(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tip_compact_block.height, u64::from(tip_height));
+
+    let mined_transaction = tip_block
+        .transactions
+        .iter()
+        .find(|tx| !tx.is_coinbase())
+        .unwrap_or(&tip_block.transactions[0]);
+    let mined_txid = TransactionHash::from(mined_transaction.hash());
+    let (mined_bytes, _mined_branch_id) = index_reader
+        .get_raw_transaction(&snapshot, &mined_txid)
+        .await
+        .unwrap()
+        .unwrap();
+    let decoded_mined = mined_bytes
+        .zcash_deserialize_into::<zebra_chain::transaction::Transaction>()
+        .unwrap();
+    assert_eq!(mined_transaction.as_ref(), &decoded_mined);
+
+    let (mined_location, mined_nonbest_locations) = index_reader
+        .get_transaction_status(&snapshot, &mined_txid)
+        .await
+        .unwrap();
+    assert_eq!(
+        mined_location,
+        Some(BestChainLocation::Block(
+            tip_block.hash().into(),
+            Height(tip_height)
+        ))
+    );
+    assert!(mined_nonbest_locations.is_empty());
+
+    let mempool_height = tip_height + 1;
+    let mempool_transaction = blocks[mempool_height as usize]
+        .zebra_block
+        .transactions
+        .iter()
+        .find(|tx| !tx.is_coinbase())
+        .expect("test vector next block contains a mempool transaction");
+    let mempool_txid = TransactionHash::from(mempool_transaction.hash());
+
+    let (mempool_bytes, mempool_branch_id) = poll_until(
+        "zero-size passthrough mempool transaction",
+        Duration::from_secs(10),
+        Duration::from_millis(25),
+        || async {
+            index_reader
+                .get_raw_transaction(&snapshot, &mempool_txid)
+                .await
+                .ok()
+                .flatten()
+        },
+    )
+    .await;
+    let decoded_mempool = mempool_bytes
+        .zcash_deserialize_into::<zebra_chain::transaction::Transaction>()
+        .unwrap();
+    assert_eq!(mempool_transaction.as_ref(), &decoded_mempool);
+    assert_eq!(
+        mempool_branch_id,
+        ConsensusBranchId::current(
+            &Network::Regtest(ActivationHeights::default()).to_zebra_network(),
+            zebra_chain::block::Height(mempool_height)
+        )
+        .map(u32::from)
+    );
+
+    let (mempool_location, mempool_nonbest_locations) = index_reader
+        .get_transaction_status(&snapshot, &mempool_txid)
+        .await
+        .unwrap();
+    assert_eq!(
+        mempool_location,
+        Some(BestChainLocation::Mempool(Height(mempool_height)))
+    );
+    assert!(mempool_nonbest_locations.is_empty());
 
     indexer.shutdown().await.unwrap();
 }

@@ -1365,8 +1365,23 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
             .map(|(_hash, block)| block.height())
     }
 
-    fn mempool_branch_id(&self, snapshot: &ChainIndexSnapshot) -> Option<u32> {
-        self.get_mempool_height(snapshot).and_then(|height| {
+    async fn mempool_branch_id(
+        &self,
+        snapshot: &ChainIndexSnapshot,
+    ) -> Result<Option<u32>, ChainIndexError> {
+        let height = match self.get_mempool_height(snapshot) {
+            Some(height) => height,
+            None if matches!(
+                snapshot,
+                ChainIndexSnapshot::StillSyncingFinalizedState { .. }
+            ) =>
+            {
+                self.best_tip_from_source().await?.height
+            }
+            None => return Ok(None),
+        };
+
+        Ok({
             ConsensusBranchId::current(&self.network, zebra_chain::block::Height::from(height + 1))
                 .map(u32::from)
         })
@@ -1964,7 +1979,7 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
             .await
         {
             let bytes = mempool_tx.serialized_tx.as_ref().as_ref().to_vec();
-            let mempool_branch_id = self.mempool_branch_id(snapshot);
+            let mempool_branch_id = self.mempool_branch_id(snapshot).await?;
 
             return Ok(Some((bytes, mempool_branch_id)));
         }
@@ -2107,15 +2122,15 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                 Ok((best_chain_block, non_best_chain_blocks))
             }
             ChainIndexSnapshot::StillSyncingFinalizedState {
-                validator_finalized_height,
+                validator_finalized_height: _,
             } => {
-                if let Some((_transaction, GetTransactionLocation::BestChain(height))) = self
+                match self
                     .source()
                     .get_transaction(*txid)
                     .await
                     .map_err(ChainIndexError::backing_validator)?
                 {
-                    if height <= *validator_finalized_height {
+                    Some((_transaction, GetTransactionLocation::BestChain(height))) => {
                         if let Some(block) = self
                             .source()
                             .get_block(HashOrHeight::Height(height))
@@ -2128,7 +2143,30 @@ impl<Source: BlockchainSource> ChainIndex for NodeBackedChainIndexSubscriber<Sou
                             ));
                         }
                     }
+                    Some((_transaction, GetTransactionLocation::Mempool)) => {
+                        let best_tip = self.best_tip_from_source().await?;
+                        return Ok((
+                            Some(BestChainLocation::Mempool(best_tip.height + 1)),
+                            HashSet::new(),
+                        ));
+                    }
+                    Some((_, GetTransactionLocation::NonbestChain)) | None => {}
                 }
+
+                if self
+                    .mempool
+                    .contains_txid(&mempool::MempoolKey {
+                        txid: txid.to_rpc_hex(),
+                    })
+                    .await
+                {
+                    let best_tip = self.best_tip_from_source().await?;
+                    return Ok((
+                        Some(BestChainLocation::Mempool(best_tip.height + 1)),
+                        HashSet::new(),
+                    ));
+                }
+
                 Ok((None, HashSet::new()))
             }
         }
