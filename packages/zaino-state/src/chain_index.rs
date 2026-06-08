@@ -822,13 +822,10 @@ impl<Source: BlockchainSource> NodeBackedChainIndex<Source> {
             .map(|db| db.status())
             .unwrap_or(StatusType::Ready);
         let mempool_status = self.mempool.status();
-        let combined_status = self
-            .status
+        self.status
             .load()
             .combine(finalized_status)
-            .combine(mempool_status);
-        self.status.store(combined_status);
-        combined_status
+            .combine(mempool_status)
     }
 
     #[instrument(name = "ChainIndex::start_sync_loop", skip(self))]
@@ -1148,13 +1145,10 @@ impl<Source: BlockchainSource> NodeBackedChainIndexSubscriber<Source> {
             .map(|state| state.status())
             .unwrap_or(StatusType::Ready);
         let mempool_status = self.mempool.status();
-        let combined_status = self
-            .status
+        self.status
             .load()
             .combine(finalized_status)
-            .combine(mempool_status);
-        self.status.store(combined_status);
-        combined_status
+            .combine(mempool_status)
     }
 
     /// Returns the number of transparent outputs of `txid` that are currently unspent in the

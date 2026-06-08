@@ -247,6 +247,55 @@ async fn zero_database_size_disables_finalized_db_sync() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn combined_status_does_not_poison_parent_lifecycle_status() {
+    init_tracing();
+
+    let blocks = load_test_vectors().unwrap().blocks;
+    let source = build_active_mockchain_source(150, blocks);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = zero_database_config(temp_dir.path().to_path_buf());
+
+    let indexer =
+        NodeBackedChainIndex::new_with_sync_timings(source.clone(), config, SyncTimings::fast())
+            .await
+            .unwrap();
+    let index_reader = indexer.subscriber();
+
+    poll_until(
+        "zero database indexer ready before mempool refresh",
+        Duration::from_secs(10),
+        Duration::from_millis(25),
+        || async { (index_reader.status() == StatusType::Ready).then_some(()) },
+    )
+    .await;
+
+    source.mine_blocks(1);
+
+    poll_until(
+        "mempool refresh entered syncing state",
+        Duration::from_secs(10),
+        Duration::from_millis(10),
+        || async { (indexer.mempool.status() == StatusType::Syncing).then_some(()) },
+    )
+    .await;
+
+    assert_eq!(indexer.status(), StatusType::Syncing);
+
+    poll_until(
+        "mempool refresh returned ready",
+        Duration::from_secs(10),
+        Duration::from_millis(25),
+        || async { (indexer.mempool.status() == StatusType::Ready).then_some(()) },
+    )
+    .await;
+
+    assert_eq!(indexer.status(), StatusType::Ready);
+    assert_eq!(index_reader.status(), StatusType::Ready);
+
+    indexer.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn zero_database_size_passthrough_serves_tip_transactions_and_mempool() {
     init_tracing();
 
